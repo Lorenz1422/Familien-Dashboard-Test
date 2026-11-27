@@ -2555,15 +2555,90 @@ function calendarBirthdayOccurrence(event,year) {
   return key;
 }
 
+function calendarRuleUntilKey(rule) {
+  if (!rule || !rule.UNTIL) return "";
+  var value = rule.UNTIL;
+  if (/^\d{8}/.test(value)) return value.substring(0,4)+"-"+value.substring(4,6)+"-"+value.substring(6,8);
+  if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.substring(0,10);
+  var parsed = new Date(value);
+  return isNaN(parsed.getTime()) ? "" : berlinDateKey(parsed.toISOString());
+}
+
+function calendarRecurringOccurrence(event,dateKey) {
+  var startKey = calendarEventStartKey(event);
+  var rule = calendarParseRule(event.apple_rrule);
+  if (!startKey || !rule.FREQ || dateKey < startKey) return false;
+  var untilKey = calendarRuleUntilKey(rule);
+  if (untilKey && dateKey > untilKey) return false;
+  if (calendarExdateKeys(event).indexOf(dateKey) !== -1) return false;
+
+  var start = safeDateParts(startKey);
+  var target = safeDateParts(dateKey);
+  if (!start || !target) return false;
+  var startDate = new Date(Date.UTC(start.year,start.month-1,start.day));
+  var targetDate = new Date(Date.UTC(target.year,target.month-1,target.day));
+  var days = Math.round((targetDate.getTime()-startDate.getTime())/86400000);
+  var interval = Math.max(1,Number(rule.INTERVAL || 1));
+  var matches = false;
+
+  if (rule.FREQ === "DAILY") {
+    matches = days % interval === 0;
+  } else if (rule.FREQ === "WEEKLY") {
+    var startWeekday = startDate.getUTCDay();
+    var targetWeekday = targetDate.getUTCDay();
+    var byDays = rule.BYDAY ? rule.BYDAY.split(",").map(function(day) {
+      return ({SU:0,MO:1,TU:2,WE:3,TH:4,FR:5,SA:6})[day.slice(-2)];
+    }).filter(function(day) { return day !== undefined; }) : [startWeekday];
+    var weekOffset = Math.floor((days + startWeekday) / 7);
+    matches = byDays.indexOf(targetWeekday) !== -1 && weekOffset % interval === 0;
+  } else if (rule.FREQ === "MONTHLY") {
+    var monthOffset = (target.year-start.year)*12 + target.month-start.month;
+    var wantedDay = rule.BYMONTHDAY ? Number(rule.BYMONTHDAY) : start.day;
+    matches = monthOffset >= 0 && monthOffset % interval === 0 && target.day === wantedDay;
+  } else if (rule.FREQ === "YEARLY") {
+    var yearOffset = target.year-start.year;
+    var wantedMonth = rule.BYMONTH ? Number(rule.BYMONTH) : start.month;
+    var wantedDayYear = rule.BYMONTHDAY ? Number(rule.BYMONTHDAY) : start.day;
+    matches = yearOffset >= 0 && yearOffset % interval === 0 && target.month === wantedMonth && target.day === wantedDayYear;
+  }
+  if (!matches) return false;
+
+  if (rule.COUNT) {
+    var count = Number(rule.COUNT);
+    var occurrenceIndex = 0;
+    for (var d = 0; d <= days; d++) {
+      var checkDate = new Date(startDate.getTime()+d*86400000);
+      var checkKey = checkDate.getUTCFullYear()+"-"+String(checkDate.getUTCMonth()+1).padStart(2,"0")+"-"+String(checkDate.getUTCDate()).padStart(2,"0");
+      if (calendarRecurringOccurrenceWithoutCount(event,checkKey,rule,start,startDate,checkDate,d)) occurrenceIndex++;
+      if (occurrenceIndex > count) return false;
+    }
+  }
+  return true;
+}
+
+function calendarRecurringOccurrenceWithoutCount(event,key,rule,start,startDate,targetDate,days) {
+  if (key < calendarEventStartKey(event) || calendarExdateKeys(event).indexOf(key) !== -1) return false;
+  var interval = Math.max(1,Number(rule.INTERVAL || 1));
+  if (rule.FREQ === "DAILY") return days % interval === 0;
+  if (rule.FREQ === "WEEKLY") {
+    var byDays = rule.BYDAY ? rule.BYDAY.split(",").map(function(day) { return ({SU:0,MO:1,TU:2,WE:3,TH:4,FR:5,SA:6})[day.slice(-2)]; }).filter(function(day) { return day !== undefined; }) : [startDate.getUTCDay()];
+    return byDays.indexOf(targetDate.getUTCDay()) !== -1 && Math.floor((days+startDate.getUTCDay())/7)%interval === 0;
+  }
+  if (rule.FREQ === "MONTHLY") return ((targetDate.getUTCFullYear()-start.year)*12+targetDate.getUTCMonth()+1-start.month)%interval===0 && targetDate.getUTCDate()===(rule.BYMONTHDAY?Number(rule.BYMONTHDAY):start.day);
+  if (rule.FREQ === "YEARLY") return (targetDate.getUTCFullYear()-start.year)%interval===0 && targetDate.getUTCMonth()+1===(rule.BYMONTH?Number(rule.BYMONTH):start.month) && targetDate.getUTCDate()===(rule.BYMONTHDAY?Number(rule.BYMONTHDAY):start.day);
+  return false;
+}
+
 function calendarEventOccursOn(event,dateKey) {
   var startKey = calendarEventStartKey(event);
   if (!startKey) return false;
+  var rule = calendarParseRule(event.apple_rrule);
+  if (rule.FREQ && dateKey >= startKey) return calendarRecurringOccurrence(event,dateKey);
 
   if (event.ganztag && event.end_datum) {
     var exclusiveEnd = String(event.end_datum).substring(0,10);
     return dateKey >= startKey && dateKey < exclusiveEnd;
   }
-
   var endKey = calendarEventEndKey(event);
   return dateKey >= startKey && dateKey <= endKey;
 }
@@ -3073,19 +3148,31 @@ function renderUpcomingEvents() {
 
   var now = new Date();
   var todayKey = berlinDateKey(now.toISOString());
-  var upcoming = calendarEvents.filter(function(event) {
+  var upcoming = [];
+  calendarEvents.forEach(function(event) {
     var startKey = calendarEventStartKey(event);
-    if (!startKey) return false;
-
-    if (event.ganztag) return startKey >= todayKey;
-    if (event.startzeit) return new Date(event.startzeit).getTime() >= now.getTime();
-    return startKey >= todayKey;
+    if (!startKey) return;
+    var recurring = !!calendarParseRule(event.apple_rrule).FREQ;
+    if (!recurring) {
+      var isFuture = event.ganztag ? startKey >= todayKey :
+        (event.startzeit ? new Date(event.startzeit).getTime() >= now.getTime() : startKey >= todayKey);
+      if (isFuture) upcoming.push(Object.assign({},event,{_occurrenceDateKey:startKey,_occurrenceSort:calendarEventSortValue(event)}));
+      return;
+    }
+    for (var offset=0; offset<120; offset++) {
+      var date = new Date(now.getFullYear(),now.getMonth(),now.getDate()+offset,12,0,0);
+      var key = localDateString(date);
+      if (calendarEventOccursOn(event,key)) {
+        if (offset > 0 || event.ganztag || !event.startzeit || new Date(event.startzeit).getTime() >= now.getTime()) {
+          upcoming.push(Object.assign({},event,{_occurrenceDateKey:key,_occurrenceSort:date.getTime()}));
+        }
+      }
+    }
   });
 
   upcoming.sort(function(a,b) {
-    return calendarEventSortValue(a)-calendarEventSortValue(b);
+    return a._occurrenceSort-b._occurrenceSort;
   });
-
   upcoming = upcoming.slice(0,20);
 
   if (!upcoming.length) {
@@ -3098,7 +3185,7 @@ function renderUpcomingEvents() {
 
   upcoming.forEach(function(event) {
     var item = calendarCreateEventElement(event);
-    var dateKey = calendarEventStartKey(event);
+    var dateKey = event._occurrenceDateKey || calendarEventStartKey(event);
     var date = document.createElement("div");
     date.className = "calendar-event-meta";
     date.textContent = berlinDateText(dateKey,{
