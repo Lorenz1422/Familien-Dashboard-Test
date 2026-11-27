@@ -233,6 +233,7 @@ label { display:block; font-size:13px; font-weight:700; margin-top:8px; }
 .recipe-actions .view-recipe { background:#D2E5E2; }
 .recipe-actions .external-recipe { background:#DCE9F5; }
 .recipe-actions .edit-recipe { background:#F7E5C9; }
+.recipe-actions .delete-recipe { background:#F3DDE5; color:#8C3038; }
 .recipe-search { margin:10px 0 12px; }
 .recipe-filters { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
 .recipe-filter {
@@ -595,6 +596,7 @@ a { color:#655B50; overflow-wrap:anywhere; }
 .task-card-actions button { border:0; border-radius:9px; padding:8px 10px; background:#E4D8C7; color:var(--text); font:inherit; font-size:12px; font-weight:700; cursor:pointer; }
 .task-card-actions .task-done { background:#D2E5E2; }
 .task-card-actions .task-archive { background:#F3DDE5; }
+.task-card-actions .task-delete { background:#F3DDE5; color:#8C3038; }
 .task-check { width:22px; height:22px; flex:0 0 22px; margin:2px 0 0; accent-color:#68866B; }
 .task-section-title { font-size:15px; font-weight:700; margin:18px 0 7px; }
 .task-empty { background:#FFFFFF80; border-radius:13px; padding:16px; text-align:center; color:#75695D; font-size:13px; margin-top:8px; }
@@ -2170,6 +2172,34 @@ document.getElementById("cancelRecipeEditButton").addEventListener("click",funct
   setStatus("recipeStatus","Bearbeitung abgebrochen.");
 });
 
+/* REZEPT LÖSCHEN – inklusive Verknüpfungen im Essensplan */
+async function deleteRecipe(recipe) {
+  var confirmed = window.confirm(
+    "Möchtet ihr das Rezept „" + recipe.name + "“ wirklich löschen?\n\n" +
+    "Es wird auch aus allen geplanten Mahlzeiten entfernt. Die Tage und Notizen im Essensplan bleiben erhalten."
+  );
+  if (!confirmed) return;
+
+  var linkedMeals = await supabaseClient.from("essensplan")
+    .update({rezept_id:null}).eq("rezept_id",recipe.id);
+  if (linkedMeals.error) {
+    setStatus("recipeStatus","Das Rezept wurde nicht gelöscht, weil die Verknüpfungen im Essensplan nicht entfernt werden konnten: " + linkedMeals.error.message,"error");
+    return;
+  }
+
+  var result = await supabaseClient.from("Rezepte").delete().eq("id",recipe.id);
+  if (result.error) {
+    setStatus("recipeStatus","Das Rezept konnte nicht gelöscht werden: " + result.error.message + ". Bitte prüft den Essensplan; seine Rezeptverknüpfung wurde bereits entfernt.","error");
+    await loadMeals();
+    return;
+  }
+
+  if (editingRecipeId !== null && String(editingRecipeId) === String(recipe.id)) resetRecipeForm();
+  document.getElementById("recipeDetail").classList.add("hidden");
+  setStatus("recipeStatus","Rezept wurde gelöscht und aus allen geplanten Mahlzeiten entfernt.","success");
+  await Promise.all([loadRecipes(),loadMeals()]);
+}
+
 /* REZEPT-DETAILANSICHT ÖFFNEN */
 function openRecipeDetail(recipe) {
   var detail = document.getElementById("recipeDetail");
@@ -2293,6 +2323,13 @@ function renderRecipes() {
     favorite.textContent = recipe.favorit ? "⭐ Favorit" : "☆ Merken";
     favorite.addEventListener("click",function() { toggleFavorite(recipe); });
     actions.appendChild(favorite);
+
+    var remove = document.createElement("button");
+    remove.className = "action-btn delete-recipe";
+    remove.type = "button";
+    remove.textContent = "🗑️ Löschen";
+    remove.addEventListener("click",function() { deleteRecipe(recipe); });
+    actions.appendChild(remove);
 
     var choose = document.createElement("button");
     choose.className = "action-btn";
@@ -3438,6 +3475,12 @@ function createTaskCard(task) {
     pause.addEventListener("click",function() { updateTask(task.id,{aktiv:false}); });
     actions.appendChild(pause);
   }
+  var remove = document.createElement("button");
+  remove.className = "task-delete";
+  remove.type = "button";
+  remove.textContent = "🗑️ Löschen";
+  remove.addEventListener("click",function() { deleteTask(task); });
+  actions.appendChild(remove);
   main.appendChild(actions);
   card.appendChild(main);
   return card;
@@ -3582,6 +3625,34 @@ async function updateTask(id,changes) {
     setStatus("taskStatus","Aufgabe aktualisiert.","success");
     await loadTasks();
   }
+}
+
+async function deleteTask(task) {
+  var confirmed = window.confirm(
+    "Möchtet ihr die Aufgabe „" + task.titel + "“ wirklich löschen?\n\n" +
+    "Der bisherige Erledigungsverlauf bleibt in der Historie erhalten."
+  );
+  if (!confirmed) return;
+
+  // Historieneinträge behalten ihren Titel und ihre übrigen Angaben;
+  // nur die Referenz auf die künftig gelöschte Aufgabe wird gelöst.
+  var historyResult = await supabaseClient.from("familienaufgaben_erledigungen")
+    .update({aufgabe_id:null}).eq("aufgabe_id",task.id);
+  if (historyResult.error) {
+    setStatus("taskStatus","Die Aufgabe wurde nicht gelöscht, weil der Erledigungsverlauf nicht sicher erhalten werden konnte: " + historyResult.error.message,"error");
+    return;
+  }
+
+  var result = await supabaseClient.from("familienaufgaben").delete().eq("id",task.id);
+  if (result.error) {
+    setStatus("taskStatus","Die Aufgabe konnte nicht gelöscht werden: " + result.error.message + ". Der Erledigungsverlauf wurde erhalten.","error");
+    await loadTasks();
+    return;
+  }
+
+  if (editingTaskId !== null && String(editingTaskId) === String(task.id)) resetTaskForm();
+  setStatus("taskStatus","Aufgabe gelöscht. Der Erledigungsverlauf bleibt in der Historie erhalten.","success");
+  await loadTasks();
 }
 
 async function completeTask(task) {
